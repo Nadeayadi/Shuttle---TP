@@ -50,7 +50,7 @@ import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.HashMap;
+import java.util.Map;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
@@ -74,7 +74,7 @@ public class ShuttleApplication extends DaggerApplication {
 
     private RefWatcher refWatcher;
 
-    public HashMap<String, UserSelectedArtwork> userSelectedArtwork = new HashMap<>();
+    private Map<String, UserSelectedArtwork> userSelectedArtwork = new HashMap<>();
 
     private static Logger jaudioTaggerLogger1 = Logger.getLogger("org.jaudiotagger.audio");
     private static Logger jaudioTaggerLogger2 = Logger.getLogger("org.jaudiotagger");
@@ -102,12 +102,7 @@ public class ShuttleApplication extends DaggerApplication {
             return;
         }
 
-        // Todo: Remove for production builds. Useful for tracking down crashes in beta.
         RxDogTag.install();
-
-        if (BuildConfig.DEBUG) {
-            // enableStrictMode();
-        }
 
         refWatcher = LeakCanary.install(this);
         // workaround to fix InputMethodManager leak as suggested by LeakCanary lib
@@ -218,7 +213,7 @@ public class ShuttleApplication extends DaggerApplication {
         try {
             return getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
         } catch (PackageManager.NameNotFoundException | NullPointerException ignored) {
-
+            // Ignored
         }
         return "unknown";
     }
@@ -296,6 +291,7 @@ public class ShuttleApplication extends DaggerApplication {
             try {
                 getContentResolver().delete(PlayCountTable.URI, selection.toString(), null);
             } catch (IllegalArgumentException ignored) {
+                // Ignored
             }
         });
     }
@@ -329,6 +325,36 @@ public class ShuttleApplication extends DaggerApplication {
                 ).flatMapCompletable(songs -> Completable.complete());
     }
 
+    private Observable<ContentProviderOperation> processSongForYearRepair(Song song) {
+        if (!TextUtils.isEmpty(song.path)) {
+            File file = new File(song.path);
+            // Don't bother checking files > 100mb, uses too much memory.
+            if (file.exists() && file.length() < 100 * 1024 * 1024) {
+                try {
+                    AudioFile audioFile = AudioFileIO.read(file);
+                    Tag tag = audioFile.getTag();
+                    if (tag != null) {
+                        String year = tag.getFirst(FieldKey.YEAR);
+                        int yearInt = StringUtils.parseInt(year);
+                        if (yearInt > 0) {
+                            song.year = yearInt;
+                            ContentValues contentValues = new ContentValues();
+                            contentValues.put(MediaStore.Audio.Media.YEAR, yearInt);
+
+                            return Observable.just(ContentProviderOperation
+                                    .newUpdate(ContentUris.withAppendedId(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, song.id))
+                                    .withValues(contentValues)
+                                    .build());
+                        }
+                    }
+                } catch (CannotReadException | IOException | TagException | ReadOnlyFileException | InvalidAudioFrameException | OutOfMemoryError e) {
+                    LogUtils.logException(TAG, "Failed to repair media store year", e);
+                }
+            }
+        }
+        return Observable.empty();
+    }
+
     @NonNull
     private Completable repairMediaStoreYearFromTags() {
 
@@ -340,53 +366,8 @@ public class ShuttleApplication extends DaggerApplication {
                 .first(Collections.emptyList())
                 .flatMapObservable(Observable::fromIterable)
                 .concatMap(song -> Observable.just(song).delay(50, TimeUnit.MILLISECONDS))
-                .flatMap(song -> {
-                            if (!TextUtils.isEmpty(song.path)) {
-                                File file = new File(song.path);
-                                // Don't bother checking files > 100mb, uses too much memory.
-                                if (file.exists() && file.length() < 100 * 1024 * 1024) {
-                                    try {
-                                        AudioFile audioFile = AudioFileIO.read(file);
-                                        Tag tag = audioFile.getTag();
-                                        if (tag != null) {
-                                            String year = tag.getFirst(FieldKey.YEAR);
-                                            int yearInt = StringUtils.parseInt(year);
-                                            if (yearInt > 0) {
-                                                song.year = yearInt;
-                                                ContentValues contentValues = new ContentValues();
-                                                contentValues.put(MediaStore.Audio.Media.YEAR, yearInt);
-
-                                                return Observable.just(ContentProviderOperation
-                                                        .newUpdate(ContentUris.withAppendedId(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, song.id))
-                                                        .withValues(contentValues)
-                                                        .build());
-                                            }
-                                        }
-                                    } catch (CannotReadException | IOException | TagException | ReadOnlyFileException | InvalidAudioFrameException | OutOfMemoryError e) {
-                                        LogUtils.logException(TAG, "Failed to repair media store year", e);
-                                    }
-                                }
-                            }
-                            return Observable.empty();
-                        }
-
-                ).toList()
-                .doOnSuccess(contentProviderOperations -> {
-                    getContentResolver().applyBatch(MediaStore.AUTHORITY, new ArrayList<>(contentProviderOperations));
-                })
+                .flatMap(this::processSongForYearRepair).toList()
+                .doOnSuccess(contentProviderOperations -> getContentResolver().applyBatch(MediaStore.AUTHORITY, new ArrayList<>(contentProviderOperations)))
                 .flatMapCompletable(songs -> Completable.complete());
-    }
-
-    private void enableStrictMode() {
-        StrictMode.setVmPolicy(new StrictMode.VmPolicy.Builder()
-                .detectAll()
-                .penaltyLog()
-                .build());
-
-        StrictMode.setThreadPolicy(new StrictMode.ThreadPolicy.Builder()
-                .detectAll()
-                .penaltyLog()
-                .penaltyFlashScreen()
-                .build());
     }
 }
