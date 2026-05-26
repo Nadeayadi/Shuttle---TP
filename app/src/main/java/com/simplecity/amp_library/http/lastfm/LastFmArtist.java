@@ -10,6 +10,7 @@ public class LastFmArtist implements LastFmResult {
     @SerializedName("artist")
     public Artist artist;
 
+    @SuppressWarnings("WeakerAccess")
     public static class Artist {
         public String name;
         @SerializedName("image")
@@ -25,6 +26,7 @@ public class LastFmArtist implements LastFmResult {
         return LastFmUtils.getBestImageUrl(artist.images);
     }
 
+    @SuppressWarnings("WeakerAccess")
     public static class Bio {
         public String summary;
     }
